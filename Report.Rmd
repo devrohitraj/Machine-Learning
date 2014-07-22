@@ -1,0 +1,157 @@
+Predictive model for activity recognition of weight lifting exercises
+=================================================================
+
+**Ankit Jain**
+
+# Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+We will fit a model to predict the manner in which the participants did the exercise, to achieve this we will use a random forest algorithm and a 5-fold cross validation. Our predicted results achieve 100% accuracy on the limited test dataset provided.
+
+# Data processing
+
+## Data cleaning
+
+First we need to download the train and test files.
+
+```{r eval = FALSE}
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "pml-training.csv", method = "curl")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "pml-testing.csv", method = "curl")
+```
+
+Then we read the csv file into two data frames named "pml.training" and "pml.testing".
+
+```{r, cache = TRUE}
+pml.training.raw<- read.csv("pml-training.csv")
+pml.testing.raw <- read.csv("pml-testing.csv")
+```
+
+The training set consists in `r nrow(pml.training.raw)` observations of `r ncol(pml.training.raw)` variables and the testing set consists in `r nrow(pml.testing.raw)` observations of `r ncol(pml.testing.raw)` variables. The "classe" variable is the dependent variable.
+
+```{r, cache = TRUE}
+names(pml.training.raw)
+```
+
+We may note that many of the `r ncol(pml.training.raw) - 1` predictors are missing most of the observations.
+
+```{r, cache = TRUE}
+sum(complete.cases(pml.training.raw))
+```
+
+So, to tidy the datasets up we remove the columns containing NA values.
+
+```{r, cache = TRUE}
+pml.training.raw <- pml.training.raw[, colSums(is.na(pml.training.raw)) == 0]
+pml.testing.raw <- pml.testing.raw[, colSums(is.na(pml.testing.raw)) == 0]
+```
+
+We may also note that some of the variables in the dataset do not come from accelerometer measurements but only record experimental setup or participants' data. Consequently we will treat those as potential confounders, so we discard the variables "X", "user_name", "raw_timestamp_part1", "raw_timestamp_part2", "cvtd_timestamp", "new_window" and "num_window".
+
+```{r, cache = TRUE}
+pml.training.raw <- pml.training.raw[, !grepl("X|user_name|timestamp|window", colnames(pml.training.raw))]
+pml.testing.raw <- pml.testing.raw[, !grepl("X|user_name|timestamp|window", colnames(pml.testing.raw))]
+```
+
+Additionnaly the data coming with the column "new_window" identifies a pre-determined time window to calculate the features of the distributions of the measurements. When set to "yes", the features fill the columns of max/min value, averag, skewness, etc. Since the test set has only 20 observations to predict with, these columns cannot be calculated in the testing phase and so are dropped in the training phase.
+
+```{r, cache = TRUE}
+pml.training.tidy <- pml.training.raw[, !grepl("^max|^min|^ampl|^var|^avg|^stdd|^ske|^kurt", colnames(pml.training.raw))]
+pml.testing.tidy <- pml.testing.raw[, !grepl("^max|^min|^ampl|^var|^avg|^stdd|^ske|^kurt", colnames(pml.testing.raw))]
+```
+
+## Data slicing
+
+We split the tidy training dataset into a pure training dataset (70% of the observations) and a validation dataset (30% of the observations) to do this we need to load the "caret" package. We will use the validation dataset to perform cross validation when developing our model. To ensure reproducibility we set a random seed beforehand.
+
+```{r fig.height = 16, fig.width = 16}
+library(caret)
+set.seed(23222)
+inTrain <- createDataPartition(y = pml.training.tidy$classe, p = 0.7, list = FALSE)
+pml.train <- pml.training.tidy[inTrain, ]
+pml.valid <- pml.training.tidy[-inTrain, ]
+pml.test <- pml.testing.tidy
+```
+
+# Exploratory analysis
+
+At this point our dataset consists in `r ncol(pml.train)` variables wich is way better than our original dataset. To further reduce this number, we look at the correlations between the variables in our dataset.
+
+```{r, cache = TRUE, fig.height = 10, fig.width = 10}
+pml.corr <- cor(pml.train[, -53])
+library(corrplot)
+corrplot(pml.corr, method = "color")
+```
+
+As we can see most predictors do not exhibit a high degree of correlation, however some variables are highly correlated.
+
+```{r, cache = TRUE}
+corr.mat <- abs(pml.corr)
+diag(corr.mat) <- 0
+high.corr <- which(corr.mat > 0.8, arr.ind = TRUE)
+for (i in 1:nrow(high.corr)) {
+    print(names(pml.train)[high.corr[i, ]])
+}
+```
+
+To cope with these highly correlated predictors we will use Principal Component Analysis (PCA) to pick the combination of predictors that captures the most information possible.
+
+# Preprocessing
+
+As mentioned before we use PCA on the training, validation and testing datasets to further reduce the number of predictors and the noise.
+
+```{r, cache = TRUE}
+preProc.pca <- preProcess(pml.train[, -53], method  = "pca", thresh = 0.95)
+pml.train.pca <- predict(preProc.pca, pml.train[, -53])
+pml.valid.pca <- predict(preProc.pca, pml.valid[, -53])
+pml.test.pca <- predict(preProc.pca, pml.test[, -53])
+print(preProc.pca)
+```
+
+# Modeling
+
+## Model fitting
+
+Our algorithm of choice to build a predictive model for activity recognition of weight lifting exercises will be the random forest algorithm as it deals naturally with non-linearity, it automatically selects which variables are more important and is generally robust to outliers and correlated covariates. So we may expect a relatively low out-of-sample error (lower than 5%). We chose to use a 5-fold cross validation method when applying the random forest algorithm.
+
+```{r, cache = TRUE}
+modFit <- train(pml.train$classe ~ ., method = "rf", data = pml.train.pca, trControl = trainControl(method = "cv", 5))
+modFit
+```
+
+Now we may review the relative importance of the resulting principal components of the trained model "modFit".
+
+```{r, cache = TRUE, fig.height = 10, fig.width = 10}
+varImpPlot(modFit$finalModel, sort = TRUE, main = "Relative importance of PCs")
+```
+
+## Model performance on validation dataset
+
+Now we are able to estimate the performance of the model on the validation dataset.
+
+```{r, cache = TRUE}
+pml.pred.valid <- predict(modFit, pml.valid.pca)
+confusionMatrix(pml.valid$classe, pml.pred.valid)
+```
+
+The out-of-sample error is the complementary to one of the model's accuracy.
+
+```{r, cache = TRUE}
+OoSE <- 1 - as.numeric(confusionMatrix(pml.valid$classe, pml.pred.valid)$overall[1])
+OoSE
+```
+
+We may conclude that the estimated out-of-sample error based on our model applied to the validation dataset is `r OoSE * 100`% which is pretty good.
+
+## Predicted results
+
+We are now able to run our model against the test dataset and display the predicted results.
+
+```{r, cache = TRUE}
+pml.pred.test <- predict(modFit, pml.test.pca)
+pml.pred.test
+```
+
+## Model performance on test dataset
+
+Our model achieves a 100% accuracy on the limited test set provided.
